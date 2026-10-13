@@ -1,0 +1,373 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>Assignment 3 - Q2 WebXR</title>
+
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      #renderCanvas {
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="renderCanvas"></canvas>
+
+    <script>
+      const canvas = document.getElementById("renderCanvas");
+      const engine = new BABYLON.Engine(canvas, true);
+
+      const createScene = async function () {
+        const scene = new BABYLON.Scene(engine);
+
+        // Camera used before entering XR
+        const camera = new BABYLON.ArcRotateCamera(
+          "camera",
+          -Math.PI / 2,
+          Math.PI / 3,
+          6,
+          new BABYLON.Vector3(0, 1, 0),
+          scene,
+        );
+
+        camera.attachControl(canvas, true);
+
+        // Basic lighting
+        const light = new BABYLON.HemisphericLight(
+          "light",
+          new BABYLON.Vector3(0, 1, 0),
+          scene,
+        );
+
+        light.intensity = 1.0;
+
+        // Horizontal surface used for controller-ray hit testing
+        const ground = BABYLON.MeshBuilder.CreateGround(
+          "ground",
+          {
+            width: 10,
+            height: 10,
+          },
+          scene,
+        );
+
+        ground.position.y = 0;
+
+        const groundMaterial = new BABYLON.StandardMaterial(
+          "groundMaterial",
+          scene,
+        );
+
+        groundMaterial.diffuseColor = new BABYLON.Color3(0.4, 0.4, 0.4);
+
+        groundMaterial.alpha = 0.25;
+
+        ground.material = groundMaterial;
+
+        ground.metadata = {
+          isHitSurface: true,
+        };
+
+        // Load model.glb but don't place it in the scene yet.
+        const modelContainer =
+          await BABYLON.SceneLoader.LoadAssetContainerAsync(
+            "./",
+            "model.glb",
+            scene,
+          );
+
+        // Most recently spawned model
+        let lastSpawned = null;
+
+        // XR controllers
+        let rightController = null;
+
+        // Current hit-test point
+        let latestHitPoint = null;
+
+        // Thumbstick values
+        let rightStick = {
+          x: 0,
+          y: 0,
+        };
+
+        let leftStick = {
+          x: 0,
+          y: 0,
+        };
+
+        // Spawn model at current hit-test point
+        function spawnModel() {
+          if (!latestHitPoint) {
+            return;
+          }
+
+          // Create a fresh instance of the loaded model
+          const instance = modelContainer.instantiateModelsToScene(function (
+            name,
+          ) {
+            return "spawned_" + name;
+          }, true);
+
+          // Parent the entire model to one transform node
+          const root = new BABYLON.TransformNode("spawnedModel", scene);
+
+          root.position.copyFrom(latestHitPoint);
+
+          root.rotationQuaternion = BABYLON.Quaternion.Identity();
+
+          root.scaling = new BABYLON.Vector3(1, 1, 1);
+
+          // Attach all model roots to this transform
+          for (const node of instance.rootNodes) {
+            node.parent = root;
+          }
+
+          // Save the original transform for reset
+          root.metadata = {
+            initialPosition: root.position.clone(),
+
+            initialRotation: root.rotationQuaternion.clone(),
+
+            initialScaling: root.scaling.clone(),
+          };
+
+          // This becomes the model controlled by the buttons/sticks
+          lastSpawned = root;
+        }
+
+        // Reset only the most recently spawned model
+        function resetLastModel() {
+          if (!lastSpawned) {
+            return;
+          }
+
+          lastSpawned.position.copyFrom(lastSpawned.metadata.initialPosition);
+
+          lastSpawned.rotationQuaternion.copyFrom(
+            lastSpawned.metadata.initialRotation,
+          );
+
+          lastSpawned.scaling.copyFrom(lastSpawned.metadata.initialScaling);
+        }
+
+        // Start WebXR
+        const xr = await scene.createDefaultXRExperienceAsync({
+          floorMeshes: [ground],
+
+          uiOptions: {
+            sessionMode: "immersive-ar",
+          },
+        });
+
+        // Controller setup
+        xr.input.onControllerAddedObservable.add(function (controller) {
+          controller.onMotionControllerInitObservable.add(
+            function (motionController) {
+              const handedness = controller.inputSource.handedness;
+
+              // --------------------------------
+              // RIGHT CONTROLLER
+              // --------------------------------
+
+              if (handedness === "right") {
+                rightController = controller;
+
+                // Right trigger:
+                // spawn model at hit-test location
+                const trigger = motionController.getComponent(
+                  "xr-standard-trigger",
+                );
+
+                if (trigger) {
+                  trigger.onButtonStateChangedObservable.add(
+                    function (component) {
+                      if (component.changes.pressed && component.pressed) {
+                        spawnModel();
+                      }
+                    },
+                  );
+                }
+
+                // Right thumbstick:
+                // move model on horizontal plane
+                const rightThumbstick = motionController.getComponent(
+                  "xr-standard-thumbstick",
+                );
+
+                if (rightThumbstick) {
+                  rightThumbstick.onAxisValueChangedObservable.add(
+                    function (axes) {
+                      rightStick.x = axes.x;
+                      rightStick.y = axes.y;
+                    },
+                  );
+                }
+
+                // A button:
+                // increase scale
+                const aButton = motionController.getComponent("a-button");
+
+                if (aButton) {
+                  aButton.onButtonStateChangedObservable.add(
+                    function (component) {
+                      if (
+                        component.changes.pressed &&
+                        component.pressed &&
+                        lastSpawned
+                      ) {
+                        lastSpawned.scaling.scaleInPlace(1.1);
+                      }
+                    },
+                  );
+                }
+
+                // B button:
+                // decrease scale
+                const bButton = motionController.getComponent("b-button");
+
+                if (bButton) {
+                  bButton.onButtonStateChangedObservable.add(
+                    function (component) {
+                      if (
+                        component.changes.pressed &&
+                        component.pressed &&
+                        lastSpawned
+                      ) {
+                        lastSpawned.scaling.scaleInPlace(0.9);
+                      }
+                    },
+                  );
+                }
+              }
+
+              // --------------------------------
+              // LEFT CONTROLLER
+              // --------------------------------
+
+              if (handedness === "left") {
+                // Left thumbstick:
+                // rotate model around Y axis
+                const leftThumbstick = motionController.getComponent(
+                  "xr-standard-thumbstick",
+                );
+
+                if (leftThumbstick) {
+                  leftThumbstick.onAxisValueChangedObservable.add(
+                    function (axes) {
+                      leftStick.x = axes.x;
+                      leftStick.y = axes.y;
+                    },
+                  );
+                }
+
+                // X button:
+                // reset the most recently spawned model
+                const xButton = motionController.getComponent("x-button");
+
+                if (xButton) {
+                  xButton.onButtonStateChangedObservable.add(
+                    function (component) {
+                      if (component.changes.pressed && component.pressed) {
+                        resetLastModel();
+                      }
+                    },
+                  );
+                }
+              }
+            },
+          );
+        });
+
+        // Update every frame
+        scene.onBeforeRenderObservable.add(function () {
+          // --------------------------------
+          // Controller ray hit test
+          // --------------------------------
+
+          if (rightController) {
+            const ray = new BABYLON.Ray();
+
+            rightController.getWorldPointerRayToRef(ray);
+
+            const pick = scene.pickWithRay(ray, function (mesh) {
+              return mesh.metadata && mesh.metadata.isHitSurface;
+            });
+
+            if (pick && pick.hit && pick.pickedPoint) {
+              latestHitPoint = pick.pickedPoint.clone();
+            } else {
+              latestHitPoint = null;
+            }
+          }
+
+          // Nothing else to control until a model exists
+          if (!lastSpawned) {
+            return;
+          }
+
+          const deltaTime = engine.getDeltaTime() / 1000.0;
+
+          const moveSpeed = 1.0;
+          const rotationSpeed = 1.5;
+          const deadZone = 0.15;
+
+          // --------------------------------
+          // Right stick movement
+          // --------------------------------
+
+          if (Math.abs(rightStick.x) > deadZone) {
+            lastSpawned.position.x += rightStick.x * moveSpeed * deltaTime;
+          }
+
+          if (Math.abs(rightStick.y) > deadZone) {
+            lastSpawned.position.z += rightStick.y * moveSpeed * deltaTime;
+          }
+
+          // --------------------------------
+          // Left stick rotation
+          // --------------------------------
+
+          if (Math.abs(leftStick.x) > deadZone) {
+            const rotation = BABYLON.Quaternion.RotationAxis(
+              BABYLON.Axis.Y,
+              -leftStick.x * rotationSpeed * deltaTime,
+            );
+
+            lastSpawned.rotationQuaternion = rotation.multiply(
+              lastSpawned.rotationQuaternion,
+            );
+          }
+        });
+
+        return scene;
+      };
+
+      createScene().then(function (scene) {
+        engine.runRenderLoop(function () {
+          scene.render();
+        });
+      });
+
+      window.addEventListener("resize", function () {
+        engine.resize();
+      });
+    </script>
+  </body>
+</html>
